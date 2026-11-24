@@ -1,0 +1,88 @@
+name: iOS unsigned IPA
+
+on:
+  push:
+    branches: [build/unsigned-ios]
+
+permissions: {}
+
+jobs:
+  build:
+    if: github.repository == 'Brabal01/polaris-maps'
+    runs-on: macos-26
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '12.23.0'
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: true
+      - name: Install JavaScript dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install CocoaPods
+        working-directory: ios
+        run: bundle exec pod install
+      - name: Build Release for iPhone
+        run: |
+          xcodebuild -version
+          xcodebuild -workspace ios/PolarisMaps.xcworkspace -scheme PolarisMaps \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/polaris-derived" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            COMPILER_INDEX_STORE_ENABLE=NO -quiet build
+      - name: Verify and package the unsigned IPA
+        run: |
+          app="$RUNNER_TEMP/polaris-derived/Build/Products/Release-iphoneos/PolarisMaps.app"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
+          test -s "$app/$executable"
+          test -s "$app/main.jsbundle"
+          test ! -e "$app/embedded.mobileprovision"
+          xcrun lipo -verify_arch arm64 "$app/$executable"
+          xcrun vtool -show-build "$app/$executable" | grep -E 'platform[[:space:]]+IOS$'
+          if codesign --display "$app" >/dev/null 2>&1; then
+            codesign --remove-signature "$app/$executable"
+          fi
+          if codesign --display "$app/$executable" >/dev/null 2>&1; then
+            echo 'The application executable is still signed.' >&2
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist"
+          mkdir -p "$RUNNER_TEMP/ipa-stage/Payload"
+          ditto "$app" "$RUNNER_TEMP/ipa-stage/Payload/PolarisMaps.app"
+          cd "$RUNNER_TEMP/ipa-stage"
+          zip -q -r -y "$GITHUB_WORKSPACE/PolarisMaps-unsigned.ipa" Payload
+          unzip -tq "$GITHUB_WORKSPACE/PolarisMaps-unsigned.ipa"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: polaris-maps-unsigned-ios
+          path: PolarisMaps-unsigned.ipa
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: polaris-maps-unsigned-ios
+      - name: Publish the IPA as a direct download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "ios-unsigned-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" PolarisMaps-unsigned.ipa \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "Polaris Maps unsigned iOS build $GITHUB_RUN_NUMBER" \
+            --notes "Release build for arm64 iPhone devices. Sign the IPA before installing. Source: $GITHUB_SHA. CI: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
