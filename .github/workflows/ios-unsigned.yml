@@ -6,6 +6,10 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ios-unsigned-build
+  cancel-in-progress: true
+
 jobs:
   build:
     if: github.repository == 'Brabal01/polaris-maps'
@@ -22,11 +26,13 @@ jobs:
           node-version: '22'
       - uses: pnpm/action-setup@v4
         with:
-          version: '12.23.0'
+          version: '11.25.0'
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.4'
           bundler-cache: true
+      - name: Install Bare worklet dependencies
+        run: npm ci --prefix backend
       - name: Install JavaScript dependencies
         run: pnpm install --frozen-lockfile
       - name: Install CocoaPods
@@ -47,6 +53,9 @@ jobs:
           test -s "$app/$executable"
           test -s "$app/main.jsbundle"
           test ! -e "$app/embedded.mobileprovision"
+          for addon in bare-fs rocksdb-native sodium-native udx-native; do
+            find "$app/Frameworks" -name "$addon.*.framework" -print -quit | grep -q .
+          done
           xcrun lipo -verify_arch arm64 "$app/$executable"
           xcrun vtool -show-build "$app/$executable" | grep -E 'platform[[:space:]]+IOS$'
           if codesign --display "$app" >/dev/null 2>&1; then
